@@ -110,3 +110,5 @@ def EVCA(args: argparse.Namespace, input_list: Iterable[str], device) -> None:
             write_block_info(args, out_blocks[0], out_blocks[1], out_blocks[2], out_blocks[3], number_of_frames)
         if args.plot_info:
             plot_block_info_EVCA(args, number_of_frames)
+
+        print('Results are saved in', f'{directory}/{file_name[:-4]}_{args.method}_{Path(file).name[:-4]}.csv')
