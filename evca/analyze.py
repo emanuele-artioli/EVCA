@@ -28,17 +28,18 @@ class EVCAConfig:
 
 @dataclass
 class EVCAResult:
-    """Result of EVCA analysis."""
-    B: np.ndarray  # Brightness per frame (N,)
-    SC: np.ndarray  # Spatial complexity per frame (N,)
-    TC: np.ndarray  # Temporal complexity per frame (N,)
-    TC2: np.ndarray  # Temporal complexity 2 per frame (N,)
+    """Result of EVCA analysis.
     
-    # Per-block features if requested
-    B_blocks: Optional[np.ndarray] = None  # (N, num_blocks)
-    SC_blocks: Optional[np.ndarray] = None
-    TC_blocks: Optional[np.ndarray] = None
-    TC2_blocks: Optional[np.ndarray] = None
+    All arrays have shape (N, num_blocks_h, num_blocks_w) where:
+    - N is the number of frames (after sampling)
+    - num_blocks_h = H // block_size
+    - num_blocks_w = W // block_size
+    """
+    B: np.ndarray  # Brightness per block (N, num_blocks_h, num_blocks_w)
+    SC: np.ndarray  # Spatial complexity per block
+    TC: np.ndarray  # Temporal complexity per block
+    TC2: np.ndarray  # Temporal complexity 2 per block
+    block_size: int  # Block size used for analysis
 
 
 class _MockArgs:
@@ -77,7 +78,6 @@ def _frames_to_blocks(frames: torch.Tensor, block_size: int) -> torch.Tensor:
 def analyze_frames(
     frames: np.ndarray,
     config: Optional[EVCAConfig] = None,
-    return_blocks: bool = False,
 ) -> EVCAResult:
     """Analyze video complexity from numpy frames.
     
@@ -85,10 +85,10 @@ def analyze_frames(
         frames: Video frames as numpy array of shape (N, H, W, 3) or (N, H, W).
                 If RGB, will be converted to Y channel. Values should be 0-255, uint8.
         config: EVCA configuration. Uses defaults if None.
-        return_blocks: If True, also return per-block features.
         
     Returns:
-        EVCAResult with complexity features per frame.
+        EVCAResult with complexity features per block.
+        All feature arrays have shape (N, num_blocks_h, num_blocks_w).
         
     Example:
         >>> from evca import analyze_frames, EVCAConfig
@@ -96,7 +96,7 @@ def analyze_frames(
         >>> 
         >>> frames = np.random.randint(0, 255, (30, 480, 640, 3), dtype=np.uint8)
         >>> result = analyze_frames(frames)
-        >>> print(f"Spatial complexity: mean={result.SC.mean():.2f}")
+        >>> print(f"SC shape: {result.SC.shape}")  # (30, 15, 20) for block_size=32
     """
     if config is None:
         config = EVCAConfig()
@@ -159,35 +159,30 @@ def analyze_frames(
     # Compute temporal features
     TC_blocks, TC2_blocks = temporal_feature_extraction(args, 0, SC_blocks, energy, last_SC, last_energy)
     
-    # Aggregate to per-frame values
-    num_blocks = (H_crop // block_size) * (W_crop // block_size)
+    # Reshape to (N, num_blocks_h, num_blocks_w)
+    num_blocks_h = H_crop // block_size
+    num_blocks_w = W_crop // block_size
     
-    B_frame = B_blocks.mean(dim=1).cpu().numpy()
-    SC_frame = SC_blocks.sum(dim=1).cpu().numpy() / num_blocks
-    TC_frame = TC_blocks.sum(dim=1).cpu().numpy() / num_blocks
-    TC2_frame = TC2_blocks.sum(dim=1).cpu().numpy() / num_blocks
+    B_out = B_blocks.cpu().numpy().reshape(nframes, num_blocks_h, num_blocks_w)
+    SC_out = SC_blocks.cpu().numpy().reshape(nframes, num_blocks_h, num_blocks_w)
     
-    # Handle first frame TC values (no previous frame)
-    TC_frame = np.insert(TC_frame, 0, 0)
-    TC2_frame = np.insert(TC2_frame, 0, 0)
-    if nframes > 1:
-        TC2_frame = np.insert(TC2_frame, 0, 0)
+    # TC has one fewer frame (no temporal diff for first frame)
+    TC_np = TC_blocks.cpu().numpy().reshape(-1, num_blocks_h, num_blocks_w)
+    TC2_np = TC2_blocks.cpu().numpy().reshape(-1, num_blocks_h, num_blocks_w)
     
-    # Truncate to match frame count
-    TC_frame = TC_frame[:nframes]
-    TC2_frame = TC2_frame[:nframes]
+    # Pad TC with zeros for first frame
+    TC_out = np.zeros((nframes, num_blocks_h, num_blocks_w), dtype=TC_np.dtype)
+    TC2_out = np.zeros((nframes, num_blocks_h, num_blocks_w), dtype=TC2_np.dtype)
     
-    result = EVCAResult(
-        B=B_frame,
-        SC=SC_frame,
-        TC=TC_frame,
-        TC2=TC2_frame,
+    if TC_np.shape[0] > 0:
+        TC_out[1:1+TC_np.shape[0]] = TC_np
+    if TC2_np.shape[0] > 0:
+        TC2_out[2:2+TC2_np.shape[0]] = TC2_np
+    
+    return EVCAResult(
+        B=B_out,
+        SC=SC_out,
+        TC=TC_out,
+        TC2=TC2_out,
+        block_size=block_size,
     )
-    
-    if return_blocks:
-        result.B_blocks = B_blocks.cpu().numpy()
-        result.SC_blocks = SC_blocks.cpu().numpy()
-        result.TC_blocks = TC_blocks.cpu().numpy()
-        result.TC2_blocks = TC2_blocks.cpu().numpy()
-    
-    return result
